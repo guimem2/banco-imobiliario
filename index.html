@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0e1a">
+<title>Banco Imobiliário Digital</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, get, update, onValue, push, serverTimestamp }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDRMBQOtF3KzTyh6aSVhYq5JuMMzL5kEfU",
+    authDomain: "banco-imobiliario-25a5e.firebaseapp.com",
+    databaseURL: "https://banco-imobiliario-25a5e-default-rtdb.firebaseio.com",
+    projectId: "banco-imobiliario-25a5e",
+    storageBucket: "banco-imobiliario-25a5e.firebasestorage.app",
+    messagingSenderId: "723584323155",
+    appId: "1:723584323155:web:2f2d47a73ce5e4ba7280a6"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // ── State ──────────────────────────────────────────────
+  let myId = null;
+  let roomCode = null;
+  let unsubscribe = null;
+  let gameState = null;
+  let selectedColor = '#00d4ff';
+  let initialBalance = 1500;
+  let passBonus = 200;
+  let selectedTransferPlayer = null;
+
+  // ── Helpers ────────────────────────────────────────────
+  function now() {
+    return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+  function uid() { return 'p_' + Math.random().toString(36).substr(2, 9); }
+  function fmtMoney(v) { return Number(v).toLocaleString('pt-BR'); }
+
+  function toast(msg, type = 'info') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast show ' + type;
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.className = 'toast', 2500);
+  }
+
+  function setScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  // ── Color pickers ──────────────────────────────────────
+  function initColorPicker(containerId, onSelect) {
+    const c = document.getElementById(containerId);
+    c.querySelectorAll('.cdot').forEach(dot => {
+      dot.onclick = () => {
+        c.querySelectorAll('.cdot').forEach(d => d.classList.remove('sel'));
+        dot.classList.add('sel');
+        onSelect(dot.dataset.color);
+      };
+    });
+    c.querySelector('.cdot').classList.add('sel');
+  }
+
+  // ── Create Room ────────────────────────────────────────
+  async function createRoom() {
+    const name = document.getElementById('setup-name').value.trim();
+    if (!name) { toast('Digite seu nome!', 'warn'); return; }
+    const customVal = parseInt(document.getElementById('custom-initial').value);
+    if (customVal > 0) initialBalance = customVal;
+
+    myId = uid();
+    roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+
+    const state = {
+      roomCode,
+      passBonus,
+      initialBalance,
+      started: false,
+      players: {
+        [myId]: { id: myId, name, color: selectedColor, balance: initialBalance, isHost: true, joinedAt: Date.now() }
+      },
+      transactions: {}
+    };
+
+    await set(ref(db, 'rooms/' + roomCode), state);
+    gameState = state;
+    showLobby();
+  }
+
+  // ── Join Room ──────────────────────────────────────────
+  async function joinRoom() {
+    const code = document.getElementById('join-code').value.trim();
+    const name = document.getElementById('join-name').value.trim();
+    if (!code || code.length < 4) { toast('Digite o código de 4 dígitos!', 'warn'); return; }
+    if (!name) { toast('Digite seu nome!', 'warn'); return; }
+
+    const snap = await get(ref(db, 'rooms/' + code));
+    if (!snap.exists()) { toast('Sala não encontrada!', 'error'); return; }
+
+    const state = snap.val();
+    if (state.started) { toast('Essa partida já começou!', 'error'); return; }
+    const players = state.players || {};
+    if (Object.keys(players).length >= 8) { toast('Sala cheia! Máx. 8 jogadores.', 'error'); return; }
+    const nameTaken = Object.values(players).find(p => p.name.toLowerCase() === name.toLowerCase());
+    if (nameTaken) { toast('Esse nome já está em uso!', 'warn'); return; }
+
+    myId = uid();
+    roomCode = code;
+
+    await update(ref(db, 'rooms/' + code + '/players/' + myId), {
+      id: myId, name, color: selectedColor,
+      balance: state.initialBalance, isHost: false, joinedAt: Date.now()
+    });
+
+    gameState = (await get(ref(db, 'rooms/' + roomCode))).val();
+    showLobby();
+  }
+
+  // ── Lobby ──────────────────────────────────────────────
+  function showLobby() {
+    document.getElementById('lobby-code').textContent = roomCode;
+    document.getElementById('lobby-initial').textContent = 'M$ ' + fmtMoney(gameState.initialBalance);
+    document.getElementById('lobby-pass').textContent = 'M$ ' + fmtMoney(gameState.passBonus);
+    setScreen('lobby');
+    listenRoom();
+  }
+
+  async function startGame() {
+    await update(ref(db, 'rooms/' + roomCode), { started: true });
+  }
+
+  // ── Listen Room ────────────────────────────────────────
+  function listenRoom() {
+    if (unsubscribe) unsubscribe();
+    const roomRef = ref(db, 'rooms/' + roomCode);
+    unsubscribe = onValue(roomRef, snap => {
+      if (!snap.exists()) return;
+      gameState = snap.val();
+      const curScreen = document.querySelector('.screen.active')?.id;
+
+      if (curScreen === 'lobby') {
+        renderLobby(gameState);
+        if (gameState.started) { setScreen('game'); renderGame(); }
+      } else if (curScreen === 'game') {
+        renderGame();
+      }
+    });
+  }
+
+  function renderLobby(state) {
+    const me = (state.players || {})[myId];
+    const isHost = me?.isHost;
+    const players = Object.values(state.players || {}).sort((a, b) => a.joinedAt - b.joinedAt);
+
+    document.getElementById('lobby-players').innerHTML = players.map(p => `
+      <div class="player-row">
+        <div class="av" style="background:${p.color}22;color:${p.color};">${p.name[0].toUpperCase()}</div>
+        <span class="pr-name">${p.name}${p.id === myId ? ' (você)' : ''}</span>
+        <span class="tag ${p.isHost ? 'tag-blue' : 'tag-green'}">${p.isHost ? 'Host' : 'Pronto'}</span>
+      </div>
+    `).join('');
+
+    document.getElementById('lobby-count').textContent = `${players.length}/8 jogadores`;
+    document.getElementById('btn-start').style.display = isHost ? 'block' : 'none';
+    document.getElementById('lobby-wait').style.display = isHost ? 'none' : 'block';
+  }
+
+  function renderGame() {
+    const state = gameState;
+    const me = (state.players || {})[myId];
+    if (!me) return;
+
+    // My balance
+    document.getElementById('my-name').textContent = me.name;
+    document.getElementById('my-bal').textContent = fmtMoney(me.balance);
+    document.getElementById('game-code').textContent = roomCode;
+    document.getElementById('pass-val').textContent = fmtMoney(state.passBonus);
+
+    // Rank
+    const sorted = Object.values(state.players || {}).sort((a, b) => b.balance - a.balance);
+    const rank = sorted.findIndex(p => p.id === myId) + 1;
+    const ranks = ['🏆 Líder', '🥈 2º lugar', '🥉 3º lugar'];
+    document.getElementById('my-rank').textContent = ranks[rank - 1] || `#${rank} lugar`;
+
+    // Players strip
+    document.getElementById('players-strip').innerHTML = sorted.map(p => `
+      <div class="pcard ${p.id === myId ? 'pcard-me' : ''}" onclick="openPlayerDetail('${p.id}')">
+        <div class="av sm" style="background:${p.color}22;color:${p.color};">${p.name[0].toUpperCase()}</div>
+        <div class="pc-name">${p.id === myId ? 'Você' : p.name}</div>
+        <div class="pc-bal">M$${fmtMoney(p.balance)}</div>
+      </div>
+    `).join('');
+
+    // History
+    const txs = Object.values(state.transactions || {}).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    const recent = txs.slice(0, 6);
+    document.getElementById('recent-txs').innerHTML = recent.length
+      ? recent.map(t => txHtml(t)).join('')
+      : '<div class="empty">Nenhuma transação ainda.</div>';
+  }
+
+  function txHtml(t) {
+    const isMine = t.fromId === myId || t.toId === myId;
+    const gain = t.toId === myId;
+    const icon = t.type === 'transfer' ? '↔' : (gain || t.type === 'self_add' ? '+' : '−');
+    const cls = gain || t.type === 'self_add' ? 'plus' : (t.type === 'transfer' && t.fromId === myId ? 'minus' : 'neutral');
+    return `
+      <div class="tx-row" style="opacity:${isMine ? 1 : 0.55}">
+        <div class="tx-icon ${t.type}">${icon}</div>
+        <div class="tx-info">
+          <div class="tx-desc">${t.description}</div>
+          <div class="tx-time">${t.time}</div>
+        </div>
+        <div class="tx-amt ${cls}">${gain || t.type === 'self_add' ? '+' : t.fromId === myId ? '-' : ''}M$${fmtMoney(t.amount)}</div>
+      </div>`;
+  }
+
+  // ── Transfer ───────────────────────────────────────────
+  window.openTransfer = function(preselect) {
+    const players = Object.values(gameState.players || {}).filter(p => p.id !== myId);
+    if (!players.length) { toast('Nenhum jogador para transferir!', 'warn'); return; }
+    selectedTransferPlayer = preselect || null;
+
+    document.getElementById('transfer-list').innerHTML = players.map(p => `
+      <div class="psel-item ${preselect === p.id ? 'selected' : ''}" id="tsp_${p.id}" onclick="selTransferPlayer('${p.id}')">
+        <div class="av sm" style="background:${p.color}22;color:${p.color};">${p.name[0].toUpperCase()}</div>
+        <div>
+          <div class="psel-name">${p.name}</div>
+          <div class="psel-bal">M$ ${fmtMoney(p.balance)}</div>
+        </div>
+      </div>
+    `).join('');
+
+    document.getElementById('transfer-amount').value = '';
+    document.querySelectorAll('#modal-transfer .preset').forEach(b => b.classList.remove('sel'));
+    openModal('modal-transfer');
+  };
+
+  window.selTransferPlayer = function(id) {
+    selectedTransferPlayer = id;
+    document.querySelectorAll('.psel-item').forEach(e => e.classList.remove('selected'));
+    document.getElementById('tsp_' + id)?.classList.add('selected');
+  };
+
+  window.doTransfer = async function() {
+    const amount = parseInt(document.getElementById('transfer-amount').value);
+    if (!selectedTransferPlayer) { toast('Selecione um jogador!', 'warn'); return; }
+    if (!amount || amount <= 0) { toast('Valor inválido!', 'warn'); return; }
+
+    const me = gameState.players[myId];
+    const target = gameState.players[selectedTransferPlayer];
+    if (me.balance < amount) { toast('Saldo insuficiente!', 'error'); return; }
+
+    const updates = {};
+    updates[`rooms/${roomCode}/players/${myId}/balance`] = me.balance - amount;
+    updates[`rooms/${roomCode}/players/${selectedTransferPlayer}/balance`] = target.balance + amount;
+    const txKey = 'tx_' + Date.now();
+    updates[`rooms/${roomCode}/transactions/${txKey}`] = {
+      type: 'transfer', fromId: myId, toId: selectedTransferPlayer,
+      amount, description: `${me.name} → ${target.name}`,
+      time: now(), ts: Date.now()
+    };
+    await update(ref(db, '/'), updates);
+    closeModal('modal-transfer');
+    toast(`M$${fmtMoney(amount)} enviado para ${target.name}!`, 'success');
+  };
+
+  // ── Self Add ───────────────────────────────────────────
+  window.openReceive = function() {
+    document.getElementById('receive-amount').value = '';
+    document.querySelectorAll('#modal-receive .preset').forEach(b => b.classList.remove('sel'));
+    openModal('modal-receive');
+  };
+
+  window.doReceive = async function() {
+    const amount = parseInt(document.getElementById('receive-amount').value);
+    const reason = document.getElementById('receive-reason').value;
+    if (!amount || amount <= 0) { toast('Valor inválido!', 'warn'); return; }
+
+    const me = gameState.players[myId];
+    const updates = {};
+    updates[`rooms/${roomCode}/players/${myId}/balance`] = me.balance + amount;
+    const txKey = 'tx_' + Date.now();
+    updates[`rooms/${roomCode}/transactions/${txKey}`] = {
+      type: 'self_add', fromId: 'bank', toId: myId,
+      amount, description: `${me.name}: ${reason}`,
+      time: now(), ts: Date.now()
+    };
+    await update(ref(db, '/'), updates);
+    closeModal('modal-receive');
+    toast(`+M$${fmtMoney(amount)} adicionado!`, 'success');
+  };
+
+  // ── Pass Start ─────────────────────────────────────────
+  window.openPassStart = function() { openModal('modal-pass'); };
+
+  window.doPassStart = async function() {
+    const bonus = gameState.passBonus;
+    const me = gameState.players[myId];
+    const updates = {};
+    updates[`rooms/${roomCode}/players/${myId}/balance`] = me.balance + bonus;
+    const txKey = 'tx_' + Date.now();
+    updates[`rooms/${roomCode}/transactions/${txKey}`] = {
+      type: 'pass', fromId: 'bank', toId: myId,
+      amount: bonus, description: `🚀 ${me.name} passou no início`,
+      time: now(), ts: Date.now()
+    };
+    await update(ref(db, '/'), updates);
+    closeModal('modal-pass');
+    toast(`+M$${fmtMoney(bonus)} de bônus!`, 'success');
+  };
+
+  // ── Card ───────────────────────────────────────────────
+  window.openCard = function() {
+    document.getElementById('card-amount').value = '';
+    document.getElementById('card-desc').value = '';
+    openModal('modal-card');
+  };
+
+  window.doCard = async function() {
+    const amount = parseInt(document.getElementById('card-amount').value);
+    const desc = document.getElementById('card-desc').value.trim() || 'Carta do baralho';
+    const type = document.getElementById('card-type').value;
+    if (!amount || amount <= 0) { toast('Digite o valor da carta!', 'warn'); return; }
+
+    const me = gameState.players[myId];
+    const newBal = type === 'plus' ? me.balance + amount : me.balance - amount;
+    const updates = {};
+    updates[`rooms/${roomCode}/players/${myId}/balance`] = newBal;
+    const txKey = 'tx_' + Date.now();
+    updates[`rooms/${roomCode}/transactions/${txKey}`] = {
+      type: 'card',
+      fromId: type === 'plus' ? 'bank' : myId,
+      toId: type === 'plus' ? myId : 'bank',
+      amount, description: `🃏 ${me.name}: ${desc}`,
+      time: now(), ts: Date.now()
+    };
+    await update(ref(db, '/'), updates);
+    closeModal('modal-card');
+    toast(type === 'plus' ? `+M$${fmtMoney(amount)} da carta!` : `-M$${fmtMoney(amount)} pela carta`, type === 'plus' ? 'success' : 'warn');
+  };
+
+  // ── History ────────────────────────────────────────────
+  window.openHistory = function() {
+    const state = gameState;
+    const total = Object.values(state.players || {}).reduce((s, p) => s + p.balance, 0);
+    document.getElementById('hist-total').textContent = 'M$ ' + fmtMoney(total);
+    const txs = Object.values(state.transactions || {}).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    document.getElementById('hist-list').innerHTML = txs.length
+      ? txs.map(t => txHtml(t)).join('')
+      : '<div class="empty">Nenhuma transação registrada.</div>';
+    openModal('modal-history');
+  };
+
+  // ── Player Detail ──────────────────────────────────────
+  window.openPlayerDetail = function(pid) {
+    const state = gameState;
+    const p = (state.players || {})[pid];
+    if (!p) return;
+    const sorted = Object.values(state.players || {}).sort((a, b) => b.balance - a.balance);
+    const rank = sorted.findIndex(x => x.id === pid) + 1;
+    const txs = Object.values(state.transactions || {})
+      .filter(t => t.fromId === pid || t.toId === pid)
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 10);
+    const isMe = pid === myId;
+
+    document.getElementById('pdetail').innerHTML = `
+      <div style="text-align:center;margin-bottom:1rem;">
+        <div class="av lg" style="background:${p.color}22;color:${p.color};margin:0 auto 0.6rem;">${p.name[0].toUpperCase()}</div>
+        <div class="pd-name">${p.name}${isMe ? ' (você)' : ''}</div>
+        <div class="pd-bal">M$ ${fmtMoney(p.balance)}</div>
+        <span class="tag ${rank === 1 ? 'tag-blue' : 'tag-green'}">#${rank} no ranking</span>
+      </div>
+      <div class="divider"></div>
+      <div class="section-label">Últimas transações</div>
+      ${txs.length ? txs.map(t => txHtml(t)).join('') : '<div class="empty">Sem transações.</div>'}
+      ${!isMe ? `<button class="btn btn-primary" style="margin-top:1rem;" onclick="closeModal('modal-player');openTransfer('${pid}')">💸 Transferir para ${p.name}</button>` : ''}
+    `;
+    openModal('modal-player');
+  };
+
+  // ── Presets ────────────────────────────────────────────
+  window.setPreset = function(btn, inputId, val) {
+    const group = btn.closest('.presets');
+    group.querySelectorAll('.preset').forEach(b => b.classList.remove('sel'));
+    btn.classList.add('sel');
+    document.getElementById(inputId).value = val;
+  };
+
+  window.selectInitial = function(btn, val) {
+    btn.closest('.presets').querySelectorAll('.preset').forEach(b => b.classList.remove('sel'));
+    btn.classList.add('sel');
+    initialBalance = val;
+    document.getElementById('custom-initial').value = '';
+  };
+
+  window.selectPass = function(btn, val) {
+    btn.closest('.presets').querySelectorAll('.preset').forEach(b => b.classList.remove('sel'));
+    btn.classList.add('sel');
+    passBonus = val;
+  };
+
+  // ── Modal helpers ──────────────────────────────────────
+  window.openModal = function(id) { document.getElementById(id).classList.add('open'); };
+  window.closeModal = function(id) { document.getElementById(id).classList.remove('open'); };
+
+  document.addEventListener('click', e => {
+    if (e.target.classList.contains('modal-overlay')) {
+      e.target.classList.remove('open');
+    }
+  });
+
+  // ── Copy code ──────────────────────────────────────────
+  window.copyCode = function() {
+    try { navigator.clipboard.writeText(roomCode); } catch(e) {}
+    toast('Código ' + roomCode + ' copiado!', 'success');
+  };
+
+  // ── Nav ────────────────────────────────────────────────
+  window.showHome = function() { if (unsubscribe) { unsubscribe(); unsubscribe = null; } setScreen('home'); };
+  window.showSetup = function() { setScreen('setup'); };
+  window.showJoin = function() { setScreen('join'); };
+  window.createRoom = createRoom;
+  window.joinRoom = joinRoom;
+  window.startGame = startGame;
+  window.doTransfer = window.doTransfer;
+
+  // ── Init ───────────────────────────────────────────────
+  initColorPicker('cpick-setup', c => selectedColor = c);
+  initColorPicker('cpick-join', c => selectedColor = c);
+</script>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #080c18;
+  --s1: #0e1420;
+  --s2: #151d30;
+  --s3: #1c2640;
+  --accent: #00d4ff;
+  --accent2: #6d28d9;
+  --green: #10b981;
+  --red: #ef4444;
+  --gold: #f59e0b;
+  --pink: #ec4899;
+  --text: #eef2ff;
+  --muted: #64748b;
+  --border: rgba(255,255,255,0.07);
+  --glow-a: 0 0 30px rgba(0,212,255,0.12);
+  --glow-p: 0 0 30px rgba(109,40,217,0.2);
+  --r: 14px;
+}
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Screens ── */
+.screen { display: none; min-height: 100dvh; flex-direction: column; }
+.screen.active { display: flex; }
+
+/* ── HOME ── */
+#home {
+  align-items: center; justify-content: center;
+  padding: 2rem 1.5rem;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(109,40,217,0.18) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 40% at 90% 90%, rgba(0,212,255,0.08) 0%, transparent 60%),
+    var(--bg);
+}
+
+.logo { text-align: center; margin-bottom: 3rem; }
+.logo-mark {
+  width: 88px; height: 88px;
+  background: linear-gradient(135deg, #6d28d9, #00d4ff);
+  border-radius: 24px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 44px; margin: 0 auto 1.2rem;
+  box-shadow: 0 0 60px rgba(109,40,217,0.5), 0 0 20px rgba(0,212,255,0.2);
+  position: relative;
+}
+.logo-mark::after {
+  content: '';
+  position: absolute; inset: -2px;
+  border-radius: 26px;
+  background: linear-gradient(135deg, rgba(109,40,217,0.6), rgba(0,212,255,0.3));
+  z-index: -1;
+  filter: blur(8px);
+}
+.logo h1 {
+  font-family: 'Orbitron', monospace;
+  font-size: 1.6rem; font-weight: 900;
+  background: linear-gradient(90deg, #fff 0%, var(--accent) 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  letter-spacing: 3px; line-height: 1.2;
+}
+.logo p { color: var(--muted); font-size: 0.75rem; letter-spacing: 2px; margin-top: 0.4rem; text-transform: uppercase; }
+
+.home-btns { width: 100%; max-width: 320px; }
+
+/* ── Buttons ── */
+.btn {
+  display: block; width: 100%;
+  padding: 0.9rem 1rem;
+  border-radius: var(--r); border: none;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 1rem; font-weight: 600;
+  cursor: pointer; transition: all 0.18s;
+  margin-bottom: 0.75rem; text-align: center;
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent2), #4f46e5);
+  color: white;
+  box-shadow: 0 4px 24px rgba(109,40,217,0.4);
+}
+.btn-secondary { background: var(--s2); color: var(--text); border: 1px solid var(--border); }
+.btn-green { background: var(--green); color: white; }
+.btn-danger { background: var(--red); color: white; }
+.btn-outline {
+  background: transparent; color: var(--accent);
+  border: 1px solid rgba(0,212,255,0.3);
+}
+
+/* ── Inputs ── */
+input, select {
+  width: 100%;
+  background: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 1rem;
+  outline: none;
+  margin-bottom: 0.75rem;
+  transition: border 0.2s;
+  -webkit-appearance: none;
+}
+input:focus, select:focus { border-color: var(--accent); }
+select option { background: var(--s2); }
+.inp-group { position: relative; }
+.inp-pfx { position: absolute; left: 1rem; top: 50%; transform: translateY(-50%); color: var(--muted); font-weight: 600; pointer-events: none; }
+.inp-group input { padding-left: 2.5rem; }
+
+/* ── Card / Surface ── */
+.card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 1.1rem 1.1rem 0.5rem;
+  margin-bottom: 0.85rem;
+}
+.card-title {
+  font-size: 0.7rem; font-weight: 600;
+  color: var(--muted); text-transform: uppercase;
+  letter-spacing: 1.2px; margin-bottom: 0.9rem;
+}
+
+/* ── Header ── */
+.hdr {
+  display: flex; align-items: center; gap: 0.9rem;
+  padding: 1.2rem 1.5rem 0;
+  margin-bottom: 1.1rem;
+}
+.back {
+  width: 36px; height: 36px;
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: 10px; display: flex; align-items: center;
+  justify-content: center; cursor: pointer;
+  font-size: 1.1rem; color: var(--text); flex-shrink: 0;
+}
+.hdr h2 {
+  font-family: 'Orbitron', monospace;
+  font-size: 0.9rem; font-weight: 700;
+  color: var(--accent); letter-spacing: 1px;
+}
+
+/* ── Color picker ── */
+.cpick { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.85rem; }
+.cdot {
+  width: 28px; height: 28px; border-radius: 50%;
+  cursor: pointer; border: 2px solid transparent;
+  transition: all 0.15s; flex-shrink: 0;
+}
+.cdot.sel { border-color: white; box-shadow: 0 0 8px rgba(255,255,255,0.3); transform: scale(1.15); }
+
+/* ── Presets ── */
+.presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; margin-bottom: 0.6rem; }
+.preset {
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.45rem 0.25rem;
+  color: var(--text); font-family: 'DM Sans', sans-serif;
+  font-size: 0.78rem; cursor: pointer; text-align: center;
+  transition: all 0.15s;
+}
+.preset:active, .preset.sel { background: var(--accent2); border-color: var(--accent2); color: white; }
+
+/* ── Avatar ── */
+.av {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 0.9rem; flex-shrink: 0;
+}
+.av.sm { width: 30px; height: 30px; font-size: 0.75rem; }
+.av.lg { width: 60px; height: 60px; font-size: 1.5rem; }
+
+/* ── Tags ── */
+.tag {
+  display: inline-block; padding: 0.2rem 0.55rem;
+  border-radius: 6px; font-size: 0.65rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.tag-green { background: rgba(16,185,129,0.12); color: var(--green); }
+.tag-blue { background: rgba(0,212,255,0.12); color: var(--accent); }
+.tag-gold { background: rgba(245,158,11,0.12); color: var(--gold); }
+
+/* ── Player row ── */
+.player-row {
+  display: flex; align-items: center; gap: 0.7rem;
+  padding: 0.65rem 0.5rem;
+  border-radius: 10px; margin-bottom: 0.3rem;
+  background: var(--s2);
+}
+.pr-name { flex: 1; font-size: 0.88rem; }
+
+/* ── LOBBY ── */
+#lobby {
+  background:
+    radial-gradient(ellipse 80% 40% at 50% 0%, rgba(109,40,217,0.12) 0%, transparent 60%),
+    var(--bg);
+}
+
+.lobby-code-box {
+  background: var(--s1);
+  border: 2px dashed rgba(0,212,255,0.25);
+  border-radius: 18px; padding: 1.4rem;
+  text-align: center; margin-bottom: 0.85rem;
+  cursor: pointer; transition: border-color 0.2s;
+}
+.lobby-code-box:active { border-color: var(--accent); }
+.lcb-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.4rem; }
+.lcb-code {
+  font-family: 'Orbitron', monospace;
+  font-size: 3rem; font-weight: 900;
+  color: var(--accent); letter-spacing: 10px;
+}
+.lcb-hint { font-size: 0.7rem; color: var(--muted); margin-top: 0.3rem; }
+
+/* ── GAME ── */
+#game { padding: 0; }
+
+.game-bar {
+  background: var(--s1);
+  border-bottom: 1px solid var(--border);
+  padding: 0.8rem 1.2rem;
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+.game-title { font-family: 'Orbitron', monospace; font-size: 0.8rem; color: var(--accent); }
+.game-bar-right { display: flex; gap: 0.5rem; }
+.code-chip {
+  background: var(--s2); border: 1px solid rgba(0,212,255,0.3);
+  border-radius: 8px; padding: 0.3rem 0.7rem;
+  font-family: 'Orbitron', monospace; font-size: 0.72rem;
+  color: var(--accent); cursor: pointer;
+}
+.icon-btn {
+  width: 32px; height: 32px;
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: 8px; display: flex; align-items: center;
+  justify-content: center; cursor: pointer; font-size: 0.85rem;
+}
+
+.game-scroll { flex: 1; overflow-y: auto; padding: 1rem; }
+.game-scroll::-webkit-scrollbar { width: 3px; }
+.game-scroll::-webkit-scrollbar-thumb { background: var(--s3); border-radius: 2px; }
+
+/* My balance */
+.bal-card {
+  background: linear-gradient(135deg, var(--s2) 0%, var(--s3) 100%);
+  border: 1px solid rgba(0,212,255,0.15);
+  border-radius: 18px; padding: 1.3rem;
+  margin-bottom: 1rem; position: relative; overflow: hidden;
+}
+.bal-card::before {
+  content: '';
+  position: absolute; top: -40px; right: -30px;
+  width: 140px; height: 140px;
+  background: radial-gradient(circle, rgba(0,212,255,0.06) 0%, transparent 70%);
+  border-radius: 50%;
+}
+.bc-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.bc-name { font-size: 1rem; font-weight: 600; margin: 0.15rem 0; }
+.bc-amount {
+  font-family: 'Orbitron', monospace;
+  font-size: 2.2rem; font-weight: 700; color: var(--green);
+  line-height: 1.1;
+}
+.bc-amount span { font-size: 1rem; margin-right: 4px; color: rgba(16,185,129,0.7); }
+
+/* Actions */
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 1rem; }
+.act {
+  background: var(--s1); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.85rem 0.5rem;
+  cursor: pointer; text-align: center; transition: all 0.18s;
+}
+.act:active { transform: scale(0.95); }
+.act-icon { font-size: 1.5rem; margin-bottom: 0.25rem; }
+.act-lbl { font-size: 0.73rem; font-weight: 500; color: var(--muted); }
+.act.a-green { border-color: rgba(16,185,129,0.2); }
+.act.a-green .act-icon, .act.a-green .act-lbl { color: var(--green); }
+.act.a-blue { border-color: rgba(0,212,255,0.2); }
+.act.a-blue .act-icon, .act.a-blue .act-lbl { color: var(--accent); }
+.act.a-purple { border-color: rgba(109,40,217,0.3); }
+.act.a-purple .act-icon, .act.a-purple .act-lbl { color: #a78bfa; }
+.act.a-gold { border-color: rgba(245,158,11,0.2); }
+.act.a-gold .act-icon, .act.a-gold .act-lbl { color: var(--gold); }
+
+/* Section */
+.sec-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+.sec-label { font-size: 0.68rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.sec-link { font-size: 0.72rem; color: var(--accent); cursor: pointer; }
+
+/* Players strip */
+.pstrip { display: flex; gap: 0.6rem; overflow-x: auto; padding-bottom: 0.5rem; margin-bottom: 1rem; scrollbar-width: none; }
+.pstrip::-webkit-scrollbar { display: none; }
+.pcard {
+  background: var(--s1); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.7rem 0.75rem;
+  min-width: 100px; text-align: center;
+  cursor: pointer; transition: all 0.18s; flex-shrink: 0;
+}
+.pcard:active { transform: scale(0.95); }
+.pcard.pcard-me { border-color: rgba(0,212,255,0.3); }
+.pcard .av { margin: 0 auto 0.35rem; }
+.pc-name { font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pc-bal { font-family: 'Orbitron', monospace; font-size: 0.65rem; color: var(--green); margin-top: 0.15rem; }
+
+/* Transactions */
+.tx-row {
+  display: flex; align-items: center; gap: 0.65rem;
+  padding: 0.6rem 0; border-bottom: 1px solid var(--border);
+}
+.tx-icon {
+  width: 30px; height: 30px;
+  border-radius: 8px; display: flex;
+  align-items: center; justify-content: center;
+  font-size: 0.85rem; flex-shrink: 0; font-weight: 700;
+}
+.tx-icon.transfer { background: rgba(0,212,255,0.1); color: var(--accent); }
+.tx-icon.self_add { background: rgba(16,185,129,0.1); color: var(--green); }
+.tx-icon.pass { background: rgba(109,40,217,0.15); color: #a78bfa; }
+.tx-icon.card { background: rgba(245,158,11,0.1); color: var(--gold); }
+.tx-info { flex: 1; min-width: 0; }
+.tx-desc { font-size: 0.78rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tx-time { font-size: 0.65rem; color: var(--muted); margin-top: 0.1rem; }
+.tx-amt { font-family: 'Orbitron', monospace; font-size: 0.78rem; font-weight: 700; flex-shrink: 0; }
+.tx-amt.plus { color: var(--green); }
+.tx-amt.minus { color: var(--red); }
+.tx-amt.neutral { color: var(--muted); }
+
+/* ── Modals ── */
+.modal-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.75); z-index: 200;
+  align-items: flex-end; justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 22px 22px 0 0;
+  padding: 1.4rem; width: 100%;
+  max-width: 480px; max-height: 85dvh;
+  overflow-y: auto;
+  animation: slideUp 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.modal::-webkit-scrollbar { width: 3px; }
+.modal::-webkit-scrollbar-thumb { background: var(--s3); border-radius: 2px; }
+@keyframes slideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.1rem; }
+.modal-title { font-family: 'Orbitron', monospace; font-size: 0.95rem; color: var(--accent); }
+.modal-x {
+  background: var(--s2); border: none; color: var(--muted);
+  width: 28px; height: 28px; border-radius: 7px;
+  cursor: pointer; font-size: 1rem; display: flex;
+  align-items: center; justify-content: center;
+}
+
+.psel-item {
+  display: flex; align-items: center; gap: 0.65rem;
+  padding: 0.6rem 0.5rem; border-radius: 10px;
+  cursor: pointer; border: 1px solid transparent;
+  margin-bottom: 0.25rem; transition: all 0.15s;
+}
+.psel-item:hover, .psel-item.selected { background: var(--s2); border-color: var(--accent); }
+.psel-name { font-size: 0.85rem; font-weight: 500; }
+.psel-bal { font-size: 0.7rem; color: var(--muted); }
+
+/* ── Toast ── */
+.toast {
+  position: fixed; top: 1rem; left: 50%;
+  transform: translateX(-50%);
+  background: var(--s3); border-radius: 10px;
+  padding: 0.55rem 1.1rem; font-size: 0.83rem;
+  z-index: 999; white-space: nowrap;
+  display: none; pointer-events: none;
+  border: 1px solid var(--border);
+}
+.toast.show { display: block; }
+.toast.success { border-color: var(--green); color: var(--green); }
+.toast.warn { border-color: var(--gold); color: var(--gold); }
+.toast.error { border-color: var(--red); color: var(--red); }
+
+.divider { height: 1px; background: var(--border); margin: 0.9rem 0; }
+.empty { text-align: center; padding: 1.5rem; color: var(--muted); font-size: 0.83rem; }
+
+.pd-name { font-size: 1.05rem; font-weight: 600; margin-bottom: 0.2rem; }
+.pd-bal { font-family: 'Orbitron', monospace; font-size: 1.6rem; color: var(--green); margin-bottom: 0.4rem; }
+
+.info-row {
+  display: flex; justify-content: space-between;
+  font-size: 0.83rem; padding: 0.3rem 0;
+}
+.info-row span:first-child { color: var(--muted); }
+.info-val { font-family: 'Orbitron', monospace; font-size: 0.8rem; color: var(--green); }
+
+.pass-box {
+  background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2);
+  border-radius: 12px; padding: 1.1rem; text-align: center; margin-bottom: 1rem;
+}
+.pass-box-label { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.3rem; }
+.pass-box-val { font-family: 'Orbitron', monospace; font-size: 2rem; color: var(--green); }
+
+.total-row {
+  background: var(--s2); border-radius: 10px;
+  padding: 0.7rem 1rem; display: flex;
+  justify-content: space-between; align-items: center;
+  margin-bottom: 1rem;
+}
+
+/* Setup / Join scroll */
+.scroll-body { flex: 1; overflow-y: auto; padding: 0 1.5rem 1.5rem; }
+.scroll-body::-webkit-scrollbar { width: 3px; }
+.scroll-body::-webkit-scrollbar-thumb { background: var(--s3); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast"></div>
+
+<!-- ══ HOME ══════════════════════════════════════════════ -->
+<div class="screen active" id="home">
+  <div class="logo">
+    <div class="logo-mark">🏦</div>
+    <h1>BANK IMOB</h1>
+    <p>Banco Imobiliário Digital</p>
+  </div>
+  <div class="home-btns">
+    <button class="btn btn-primary" onclick="showSetup()">🎮 &nbsp;Criar Nova Partida</button>
+    <button class="btn btn-secondary" onclick="showJoin()">🔗 &nbsp;Entrar com Código</button>
+  </div>
+</div>
+
+<!-- ══ SETUP ═════════════════════════════════════════════ -->
+<div class="screen" id="setup">
+  <div class="hdr"><div class="back" onclick="showHome()">←</div><h2>NOVA PARTIDA</h2></div>
+  <div class="scroll-body">
+
+    <div class="card">
+      <div class="card-title">Seu Perfil</div>
+      <input type="text" id="setup-name" placeholder="Seu nome no jogo" maxlength="14">
+      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.5rem;">Cor do avatar</div>
+      <div class="cpick" id="cpick-setup">
+        <div class="cdot" data-color="#00d4ff" style="background:#00d4ff"></div>
+        <div class="cdot" data-color="#6d28d9" style="background:#6d28d9"></div>
+        <div class="cdot" data-color="#10b981" style="background:#10b981"></div>
+        <div class="cdot" data-color="#f59e0b" style="background:#f59e0b"></div>
+        <div class="cdot" data-color="#ef4444" style="background:#ef4444"></div>
+        <div class="cdot" data-color="#ec4899" style="background:#ec4899"></div>
+        <div class="cdot" data-color="#f97316" style="background:#f97316"></div>
+        <div class="cdot" data-color="#a78bfa" style="background:#a78bfa"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Saldo Inicial por Jogador</div>
+      <div class="presets">
+        <div class="preset sel" onclick="selectInitial(this,1500)">M$ 1.500</div>
+        <div class="preset" onclick="selectInitial(this,2000)">M$ 2.000</div>
+        <div class="preset" onclick="selectInitial(this,3000)">M$ 3.000</div>
+      </div>
+      <div class="inp-group">
+        <span class="inp-pfx">M$</span>
+        <input type="number" id="custom-initial" placeholder="Valor personalizado...">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Bônus ao Passar no Início</div>
+      <div class="presets">
+        <div class="preset sel" onclick="selectPass(this,200)">M$ 200</div>
+        <div class="preset" onclick="selectPass(this,100)">M$ 100</div>
+        <div class="preset" onclick="selectPass(this,300)">M$ 300</div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="createRoom()">🚀 Criar Sala</button>
+  </div>
+</div>
+
+<!-- ══ JOIN ══════════════════════════════════════════════ -->
+<div class="screen" id="join">
+  <div class="hdr"><div class="back" onclick="showHome()">←</div><h2>ENTRAR NA SALA</h2></div>
+  <div class="scroll-body">
+
+    <div class="card">
+      <div class="card-title">Código da Sala</div>
+      <input type="number" id="join-code" placeholder="0000" maxlength="4"
+        style="font-family:'Orbitron',monospace;font-size:2rem;text-align:center;letter-spacing:10px;">
+    </div>
+
+    <div class="card">
+      <div class="card-title">Seu Perfil</div>
+      <input type="text" id="join-name" placeholder="Seu nome no jogo" maxlength="14">
+      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.5rem;">Cor do avatar</div>
+      <div class="cpick" id="cpick-join">
+        <div class="cdot" data-color="#00d4ff" style="background:#00d4ff"></div>
+        <div class="cdot" data-color="#6d28d9" style="background:#6d28d9"></div>
+        <div class="cdot" data-color="#10b981" style="background:#10b981"></div>
+        <div class="cdot" data-color="#f59e0b" style="background:#f59e0b"></div>
+        <div class="cdot" data-color="#ef4444" style="background:#ef4444"></div>
+        <div class="cdot" data-color="#ec4899" style="background:#ec4899"></div>
+        <div class="cdot" data-color="#f97316" style="background:#f97316"></div>
+        <div class="cdot" data-color="#a78bfa" style="background:#a78bfa"></div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="joinRoom()">🔗 Entrar na Sala</button>
+  </div>
+</div>
+
+<!-- ══ LOBBY ═════════════════════════════════════════════ -->
+<div class="screen" id="lobby">
+  <div class="hdr"><h2>SALA DE ESPERA</h2></div>
+  <div class="scroll-body">
+
+    <div class="lobby-code-box" onclick="copyCode()">
+      <div class="lcb-label">Código da sala — toque para copiar</div>
+      <div class="lcb-code" id="lobby-code">----</div>
+      <div class="lcb-hint">Compartilhe com os amigos 👆</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Jogadores</div>
+      <div id="lobby-players"></div>
+      <div style="font-size:0.75rem;color:var(--muted);margin-top:0.4rem;" id="lobby-count">0/8 jogadores</div>
+      <div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem;display:none;" id="lobby-wait">Aguardando o host iniciar o jogo…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Configurações</div>
+      <div class="info-row"><span>Saldo inicial</span><span class="info-val" id="lobby-initial">M$ 1.500</span></div>
+      <div class="info-row"><span>Bônus do início</span><span class="info-val" id="lobby-pass">M$ 200</span></div>
+    </div>
+
+    <button class="btn btn-primary" id="btn-start" onclick="startGame()" style="display:none;">🎮 Iniciar Partida</button>
+    <button class="btn btn-secondary" onclick="showHome()">Sair da Sala</button>
+  </div>
+</div>
+
+<!-- ══ GAME ══════════════════════════════════════════════ -->
+<div class="screen" id="game">
+  <div class="game-bar">
+    <span class="game-title">🏦 BANK IMOB</span>
+    <div class="game-bar-right">
+      <div class="code-chip" id="game-code" onclick="copyCode()">----</div>
+      <div class="icon-btn" onclick="openHistory()" title="Histórico">📋</div>
+    </div>
+  </div>
+
+  <div class="game-scroll">
+
+    <!-- My balance -->
+    <div class="bal-card">
+      <div class="bc-label">Seu Saldo</div>
+      <div class="bc-name" id="my-name">—</div>
+      <div class="bc-amount"><span>M$</span><span id="my-bal">0</span></div>
+      <div style="margin-top:0.5rem;"><span class="tag tag-gold" id="my-rank">🏆 Líder</span></div>
+    </div>
+
+    <!-- Actions -->
+    <div class="sec-row"><div class="sec-label">Ações</div></div>
+    <div class="actions">
+      <div class="act a-green" onclick="openTransfer()">
+        <div class="act-icon">💸</div><div class="act-lbl">Transferir</div>
+      </div>
+      <div class="act a-blue" onclick="openReceive()">
+        <div class="act-icon">📥</div><div class="act-lbl">Receber / Adicionar</div>
+      </div>
+      <div class="act a-purple" onclick="openPassStart()">
+        <div class="act-icon">🚀</div><div class="act-lbl">Passei no Início</div>
+      </div>
+      <div class="act a-gold" onclick="openCard()">
+        <div class="act-icon">🃏</div><div class="act-lbl">Carta do Baralho</div>
+      </div>
+    </div>
+
+    <!-- Players -->
+    <div class="sec-row">
+      <div class="sec-label">Jogadores</div>
+    </div>
+    <div class="pstrip" id="players-strip"></div>
+
+    <!-- History -->
+    <div class="sec-row">
+      <div class="sec-label">Últimas Transações</div>
+      <div class="sec-link" onclick="openHistory()">Ver tudo</div>
+    </div>
+    <div id="recent-txs"><div class="empty">Nenhuma transação ainda.</div></div>
+
+    <div style="height:1.5rem;"></div>
+  </div>
+</div>
+
+<!-- ══ MODAL: Transfer ════════════════════════════════════ -->
+<div class="modal-overlay" id="modal-transfer">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">💸 Transferir</span>
+      <button class="modal-x" onclick="closeModal('modal-transfer')">✕</button>
+    </div>
+    <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem;">Para qual jogador?</div>
+    <div id="transfer-list"></div>
+    <div class="divider"></div>
+    <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.5rem;">Valor</div>
+    <div class="presets">
+      <div class="preset" onclick="setPreset(this,'transfer-amount',50)">M$ 50</div>
+      <div class="preset" onclick="setPreset(this,'transfer-amount',100)">M$ 100</div>
+      <div class="preset" onclick="setPreset(this,'transfer-amount',200)">M$ 200</div>
+      <div class="preset" onclick="setPreset(this,'transfer-amount',500)">M$ 500</div>
+      <div class="preset" onclick="setPreset(this,'transfer-amount',1000)">M$ 1.000</div>
+      <div class="preset" onclick="setPreset(this,'transfer-amount',2000)">M$ 2.000</div>
+    </div>
+    <div class="inp-group" style="margin-top:0.5rem;">
+      <span class="inp-pfx">M$</span>
+      <input type="number" id="transfer-amount" placeholder="Outro valor...">
+    </div>
+    <button class="btn btn-primary" onclick="doTransfer()">Confirmar Transferência</button>
+  </div>
+</div>
+
+<!-- ══ MODAL: Receive ═════════════════════════════════════ -->
+<div class="modal-overlay" id="modal-receive">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">📥 Adicionar Saldo</span>
+      <button class="modal-x" onclick="closeModal('modal-receive')">✕</button>
+    </div>
+    <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.5rem;">Motivo (fica no histórico)</div>
+    <select id="receive-reason">
+      <option>💰 Salário</option>
+      <option>🏆 Prêmio</option>
+      <option>🏠 Venda de propriedade</option>
+      <option>🃏 Carta de sorte</option>
+      <option>🏦 Empréstimo do banco</option>
+      <option>📋 Outro</option>
+    </select>
+    <div class="presets">
+      <div class="preset" onclick="setPreset(this,'receive-amount',50)">M$ 50</div>
+      <div class="preset" onclick="setPreset(this,'receive-amount',100)">M$ 100</div>
+      <div class="preset" onclick="setPreset(this,'receive-amount',200)">M$ 200</div>
+      <div class="preset" onclick="setPreset(this,'receive-amount',500)">M$ 500</div>
+      <div class="preset" onclick="setPreset(this,'receive-amount',1000)">M$ 1.000</div>
+      <div class="preset" onclick="setPreset(this,'receive-amount',2000)">M$ 2.000</div>
+    </div>
+    <div class="inp-group" style="margin-top:0.5rem;">
+      <span class="inp-pfx">M$</span>
+      <input type="number" id="receive-amount" placeholder="Valor...">
+    </div>
+    <button class="btn btn-green" onclick="doReceive()">+ Adicionar ao Saldo</button>
+  </div>
+</div>
+
+<!-- ══ MODAL: Pass Start ══════════════════════════════════ -->
+<div class="modal-overlay" id="modal-pass">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">🚀 Passei no Início!</span>
+      <button class="modal-x" onclick="closeModal('modal-pass')">✕</button>
+    </div>
+    <div class="pass-box">
+      <div class="pass-box-label">Você vai receber</div>
+      <div class="pass-box-val">M$ <span id="pass-val">200</span></div>
+    </div>
+    <button class="btn btn-green" onclick="doPassStart()">✅ Confirmar Bônus</button>
+    <button class="btn btn-secondary" onclick="closeModal('modal-pass')">Cancelar</button>
+  </div>
+</div>
+
+<!-- ══ MODAL: Card ════════════════════════════════════════ -->
+<div class="modal-overlay" id="modal-card">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">🃏 Carta do Baralho</span>
+      <button class="modal-x" onclick="closeModal('modal-card')">✕</button>
+    </div>
+    <select id="card-type">
+      <option value="plus">Recebi dinheiro na carta</option>
+      <option value="minus">Paguei dinheiro na carta</option>
+    </select>
+    <input type="text" id="card-desc" placeholder="Descrição (ex: Prêmio da sorte…)" maxlength="40">
+    <div class="inp-group">
+      <span class="inp-pfx">M$</span>
+      <input type="number" id="card-amount" placeholder="Valor da carta...">
+    </div>
+    <button class="btn btn-primary" onclick="doCard()">Confirmar Carta</button>
+  </div>
+</div>
+
+<!-- ══ MODAL: History ════════════════════════════════════ -->
+<div class="modal-overlay" id="modal-history">
+  <div class="modal" style="max-height:82dvh;display:flex;flex-direction:column;">
+    <div class="modal-header">
+      <span class="modal-title">📋 Histórico</span>
+      <button class="modal-x" onclick="closeModal('modal-history')">✕</button>
+    </div>
+    <div class="total-row">
+      <span style="font-size:0.8rem;color:var(--muted);">Total em jogo</span>
+      <span style="font-family:'Orbitron',monospace;font-size:0.9rem;color:var(--gold);" id="hist-total">M$ 0</span>
+    </div>
+    <div id="hist-list" style="overflow-y:auto;flex:1;"></div>
+  </div>
+</div>
+
+<!-- ══ MODAL: Player Detail ══════════════════════════════ -->
+<div class="modal-overlay" id="modal-player">
+  <div class="modal" style="max-height:82dvh;overflow-y:auto;">
+    <div class="modal-header">
+      <span class="modal-title">👤 Jogador</span>
+      <button class="modal-x" onclick="closeModal('modal-player')">✕</button>
+    </div>
+    <div id="pdetail"></div>
+  </div>
+</div>
+
+</body>
+</html>
