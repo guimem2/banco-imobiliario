@@ -96,6 +96,7 @@
 
     await set(ref(db, 'rooms/' + roomCode), state);
     gameState = state;
+    saveSession();
     showLobby();
   }
 
@@ -110,8 +111,15 @@
     if (!snap.exists()) { toast('Sala não encontrada!', 'error'); return; }
 
     const state = snap.val();
-    if (state.started) { toast('Essa partida já começou!', 'error'); return; }
     const players = state.players || {};
+    const existing = Object.values(players).find(p => p.name.toLowerCase() === name.toLowerCase());
+    if (state.started) {
+      if (!existing) { toast('Essa partida já começou! Para voltar, use o mesmo nome de antes.', 'error'); return; }
+      myId = existing.id; roomCode = code; gameState = state;
+      saveSession();
+      setScreen('game'); renderGame(); listenRoom();
+      return;
+    }
     if (Object.keys(players).length >= 8) { toast('Sala cheia! Máx. 8 jogadores.', 'error'); return; }
     const nameTaken = Object.values(players).find(p => p.name.toLowerCase() === name.toLowerCase());
     if (nameTaken) { toast('Esse nome já está em uso!', 'warn'); return; }
@@ -125,6 +133,7 @@
     });
 
     gameState = (await get(ref(db, 'rooms/' + roomCode))).val();
+    saveSession();
     showLobby();
   }
 
@@ -429,7 +438,7 @@
   };
 
   // ── Nav ────────────────────────────────────────────────
-  window.showHome = function() { if (unsubscribe) { unsubscribe(); unsubscribe = null; } setScreen('home'); };
+  window.showHome = function() { clearSession(); if (unsubscribe) { unsubscribe(); unsubscribe = null; } setScreen('home'); };
   window.showSetup = function() { setScreen('setup'); };
   window.showJoin = function() { setScreen('join'); };
   window.createRoom = createRoom;
@@ -440,6 +449,28 @@
   // ── Init ───────────────────────────────────────────────
   initColorPicker('cpick-setup', c => selectedColor = c);
   initColorPicker('cpick-join', c => selectedColor = c);
+
+  // ── Sessão salva (voltar para a partida após sair/atualizar) ──
+  function saveSession() {
+    try { localStorage.setItem('bi_session', JSON.stringify({ roomCode, myId })); } catch (e) {}
+  }
+  function clearSession() {
+    try { localStorage.removeItem('bi_session'); } catch (e) {}
+  }
+  async function resumeSession() {
+    let s = null;
+    try { s = JSON.parse(localStorage.getItem('bi_session') || 'null'); } catch (e) {}
+    if (!s || !s.roomCode || !s.myId) return;
+    try {
+      const snap = await get(ref(db, 'rooms/' + s.roomCode));
+      const st = snap.exists() ? snap.val() : null;
+      if (!st || !(st.players || {})[s.myId]) { clearSession(); return; }
+      myId = s.myId; roomCode = s.roomCode; gameState = st;
+      if (st.started) { setScreen('game'); renderGame(); listenRoom(); }
+      else showLobby();
+    } catch (e) {}
+  }
+  resumeSession();
 </script>
 
 <style>
